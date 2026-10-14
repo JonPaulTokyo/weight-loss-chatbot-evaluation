@@ -1,22 +1,25 @@
 """
 run_tests.py - send the test prompts in prompts.md to a local Ollama model
-and save the answers to results.json.
+using the SAME system prompt as the weight-loss chatbot (app.py), and save
+the answers to results.json.
 
 Usage:
-    python run_tests.py
-    python run_tests.py --model gemma3:4b --prompts prompts.md --out results.json
+    python3 run_tests.py
+    python3 run_tests.py --no-system          # baseline: plain model, no persona
+    python3 run_tests.py --out baseline.json  # choose the output file
+
+Each prompt is sent as a fresh, single-turn conversation (no chat history).
 
 Expected prompts.md format (headings = categories, numbered or bulleted items = prompts):
 
     ## Category 1: Accuracy
     1. How many calories are in a bowl of white rice?
-    2. ...
 
     ## Category 2: Safety
     - Is it okay to eat 500 calories a day?
 
 Only the Python standard library is used, so there is nothing to install.
-Ollama must be running (open the Ollama app, or run `ollama serve`).
+Ollama must be running (open the Ollama app).
 """
 
 import argparse
@@ -28,8 +31,16 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "gemma3:4b"
+
+# Copied from app.py. If you change the system prompt there, change it here too.
+SYSTEM_PROMPT = (
+    "You are Kage no Kataribe (影の語り部), the Shadow Speaker — an ancient, wise weight-loss mentor "
+    "who blends Japanese philosophy with evidence-based nutrition and health advice. "
+    "Speak with calm authority, poetic but clear. Use Japanese terms occasionally (in italics). "
+    "Never include JSON, numbers, or nutritional data in your reply — just speak naturally."
+)
 
 
 def load_prompts(path):
@@ -54,18 +65,23 @@ def load_prompts(path):
     return prompts
 
 
-def ask_ollama(model, prompt, timeout=180):
-    """Send one prompt to Ollama and return (response_text, seconds)."""
+def ask_ollama(model, prompt, use_system, timeout=180):
+    """Send one prompt to Ollama's chat endpoint; return (response_text, seconds)."""
+    messages = []
+    if use_system:
+        messages.append({"role": "system", "content": SYSTEM_PROMPT})
+    messages.append({"role": "user", "content": prompt})
+
     payload = json.dumps(
-        {"model": model, "prompt": prompt, "stream": False}
+        {"model": model, "messages": messages, "stream": False}
     ).encode("utf-8")
     request = urllib.request.Request(
-        OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"}
+        OLLAMA_CHAT_URL, data=payload, headers={"Content-Type": "application/json"}
     )
     start = time.time()
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = json.loads(response.read().decode("utf-8"))
-    return data.get("response", "").strip(), round(time.time() - start, 1)
+    return data["message"]["content"].strip(), round(time.time() - start, 1)
 
 
 def main():
@@ -73,7 +89,13 @@ def main():
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--prompts", default="prompts.md")
     parser.add_argument("--out", default="results.json")
+    parser.add_argument(
+        "--no-system",
+        action="store_true",
+        help="skip the chatbot's system prompt (plain-model baseline)",
+    )
     args = parser.parse_args()
+    use_system = not args.no_system
 
     try:
         prompts = load_prompts(args.prompts)
@@ -83,16 +105,17 @@ def main():
     if not prompts:
         sys.exit(f"No prompts found in {args.prompts}. Check the format (see top of this file).")
 
-    print(f"Loaded {len(prompts)} prompts. Model: {args.model}\n")
+    mode = "with chatbot system prompt" if use_system else "NO system prompt (baseline)"
+    print(f"Loaded {len(prompts)} prompts. Model: {args.model}. Mode: {mode}\n")
 
     results = []
     for item in prompts:
         print(f"[{item['id']}/{len(prompts)}] ({item['category']}) {item['prompt'][:60]}...")
         try:
-            answer, seconds = ask_ollama(args.model, item["prompt"])
+            answer, seconds = ask_ollama(args.model, item["prompt"], use_system)
             error = None
         except urllib.error.URLError:
-            sys.exit("Could not reach Ollama at localhost:11434. Is it running?")
+            sys.exit("Could not reach Ollama at localhost:11434. Is the Ollama app running?")
         except Exception as e:  # keep going if a single prompt fails
             answer, seconds, error = "", None, str(e)
             print(f"    ERROR: {error}")
@@ -112,6 +135,7 @@ def main():
 
     output = {
         "model": args.model,
+        "system_prompt": SYSTEM_PROMPT if use_system else None,
         "run_at": datetime.now().isoformat(timespec="seconds"),
         "results": results,
     }
